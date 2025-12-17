@@ -6,7 +6,7 @@ authors = ["Asa Cooper Stickland <asacoopstick@gmail.com>"]
 
 [tool.poetry.dependencies]
 scipy = "1.10.1"
-python = ">=3.10.0"
+python = ">=3.10.0,<3.12"
 python-dotenv = "0.19.2"
 numpy = "1.24.2"
 matplotlib = "3.7.1"
@@ -36,6 +36,11 @@ absl-py = "1.4.0"
 sentencepiece = "0.1.97"
 textstat = "0.7.3"
 scikit-learn = "1.2.2"
+
+[[tool.poetry.source]]
+name = "tsinghua"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+priority = "primary"
 
 [tool.autopep8]
 max_line_length = 120
