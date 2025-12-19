@@ -445,7 +445,10 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
     # DDP：wrap（必须在构造 optimizer 前完成；我们的 optimizer 在 train_token_budget 内部创建）
     if ddp_enabled:
         model.to(device)
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+        # [Fix] Gemma3 等模型可能有未参与计算的参数，需开启 find_unused_parameters=True
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True
+        )
 
     # 6) 开始训练：默认按 num_epochs 停止（至少遍历训练集一次）
     # 兼容旧模式：若显式提供 --token_budget，则按 token_budget 停止。

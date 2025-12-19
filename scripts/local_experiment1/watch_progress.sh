@@ -11,14 +11,26 @@ set -euo pipefail
 # - 解析 train.log 里形如：tokens_seen=12345/2000000
 #
 # 用法（通常由 tmux_exp1.sh 自动调用）：
-#   bash scripts/local_experiment1/watch_progress.sh <run_root> <num_epochs_or_token_budget>
+#   旧（兼容）：bash scripts/local_experiment1/watch_progress.sh <run_root> <num_epochs_or_token_budget>
+#   新（推荐）：bash scripts/local_experiment1/watch_progress.sh <run_root> <mode:epoch|token> <value>
 
 RUN_ROOT="${1:?missing run_root}"
-ARG2="${2:?missing num_epochs_or_token_budget}"
 
-# 说明：ARG2 可能是 num_epochs（默认 1），也可能是旧 token_budget。
-NUM_EPOCHS_GUESS="$ARG2"
-TOKEN_BUDGET_GUESS="$ARG2"
+MODE_OR_VALUE="${2:?missing mode_or_num_epochs_or_token_budget}"
+VALUE="${3:-}"
+
+MODE="auto"
+if [[ "$MODE_OR_VALUE" == "epoch" || "$MODE_OR_VALUE" == "token" ]]; then
+  MODE="$MODE_OR_VALUE"
+  VALUE="${VALUE:?missing value for mode=$MODE}"
+else
+  MODE="auto"
+  VALUE="$MODE_OR_VALUE"
+fi
+
+# 说明：VALUE 在 auto 模式下可能是 num_epochs（默认 1），也可能是旧 token_budget。
+NUM_EPOCHS_GUESS="$VALUE"
+TOKEN_BUDGET_GUESS="$VALUE"
 
 SLEEP_SECS="${PROGRESS_SLEEP:-10}"
 BAR_WIDTH="${PROGRESS_BAR_WIDTH:-36}"
@@ -116,7 +128,29 @@ render_one() {
     pct=100
     status="DONE"
   else
-    # 1) 优先按 epoch 解析
+    # 0) 显式 token 模式：直接走 token 解析
+    if [[ "$MODE" == "token" ]]; then
+      local seen budget
+      read -r seen budget < <(parse_seen_budget "$log_path")
+      if [[ "$budget" -le 0 ]]; then
+        budget="$TOKEN_BUDGET_GUESS"
+      fi
+      pct=$(( seen * 100 / budget ))
+      status="RUNNING"
+
+      if [[ ! -f "$log_path" ]]; then
+        status="WAITING"
+      elif ! grep -q 'tokens_seen=' "$log_path" 2>/dev/null; then
+        status="STARTING"
+      fi
+
+      printf '%-7s ' "$name"
+      bar "$pct" "$BAR_WIDTH"
+      printf '  (%s/%s tokens)  %s\n' "$seen" "$budget" "$status"
+      return 0
+    fi
+
+    # 1) epoch（或 auto）模式：优先按 epoch 解析
     local epoch_cur epoch_total step_cur step_total
     if parse_epoch_progress "$log_path" >/dev/null 2>&1; then
       read -r epoch_cur epoch_total step_cur step_total < <(parse_epoch_progress "$log_path")
@@ -143,6 +177,19 @@ render_one() {
       printf '%-7s ' "$name"
       bar "$pct" "$BAR_WIDTH"
       printf '  (epoch %s/%s, step %s/%s)  %s\n' "$epoch_cur" "$epoch_total" "$step_cur" "$step_total" "$status"
+      return 0
+    fi
+
+    # 显式 epoch 模式：没有 epoch 日志时，也按 epoch 显示 WAITING/STARTING（不回退 tokens）
+    if [[ "$MODE" == "epoch" ]]; then
+      if [[ ! -f "$log_path" ]]; then
+        status="WAITING"
+      else
+        status="STARTING"
+      fi
+      printf '%-7s ' "$name"
+      bar 0 "$BAR_WIDTH"
+      printf '  (epoch 0/%s, step 0/0)  %s\n' "$NUM_EPOCHS_GUESS" "$status"
       return 0
     fi
 
@@ -178,7 +225,8 @@ while true; do
 
   echo "=== Experiment 1 训练进度（优先按 epoch；兼容 token_budget）==="
   echo "run_root: $RUN_ROOT"
-  echo "arg2: $ARG2"
+  echo "mode: $MODE"
+  echo "value: $VALUE"
   echo "updated: $(date '+%F %T')"
   echo
 
