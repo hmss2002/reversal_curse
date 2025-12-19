@@ -1,0 +1,9 @@
+Llama-3.2-3B-Instruct（text only） good
+Llama-3.1-8B-Instruct  
+Qwen3-0.6B（0.6B 参数）
+Qwen3-1.7B（1.7B 参数）
+Qwen3-4B（4B 参数） good
+Qwen3-8B（8B 参数） 
+DeepSeek-R1-Distill-Qwen-1.5B
+DeepSeek-R1-Distill-Qwen-7B
+Gemma 3 4B good
