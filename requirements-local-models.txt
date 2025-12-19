@@ -1,0 +1,27 @@
+# 这份 requirements 用于“本地开源模型 + LoRA 复现实验 1”。
+#
+# 背景：原仓库把 transformers 固定在 4.28.1，无法稳定加载 Llama-3.2 / Qwen3 / Gemma 3。
+# 因此这里单独提供一份依赖清单，避免改动原有实验（OpenAI API 路径）。
+#
+# 建议：在 conda 环境 reversalcurse 中执行：
+#   pip install -r requirements-local-models.txt
+
+# 新模型支持
+transformers>=4.45.0
+huggingface_hub>=0.24.0
+safetensors>=0.4.3
+
+# LoRA
+peft>=0.13.0
+
+# 训练与数据
+accelerate>=0.22.0
+datasets>=2.11.0
+
+# 分词（Llama / SentencePiece 模型）
+sentencepiece>=0.1.99
+
+# 评测输出
+pandas>=1.5.3
+tqdm>=4.67.0
+packaging>=25.0

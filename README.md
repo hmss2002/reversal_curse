@@ -118,3 +118,20 @@ python scripts/evaluate_quickly.py --wandb-entity {your wandb username} --wandb-
 ```
 
 You will then be able to see the results of your evaluations on weights and biases.
+
+## Local (open-source) reproduction: Experiment 1 with LoRA
+
+This repo originally fine-tunes OpenAI API models. If you want to reproduce Experiment 1 locally with open-source models using LoRA and a fixed **token budget** (so models see the same number of tokens), see:
+
+- scripts/local_experiment1/train_lora.py
+- scripts/local_experiment1/eval_experiment1.py
+- scripts/local_experiment1/tmux_exp1.sh
+- scripts/local_models/download_models.py
+
+Note: Llama repos may be gated/denied. The default tmux workflow uses Microsoft Phi-3.5-mini-instruct as the third model.
+
+Install extra deps:
+
+```
+pip install -r requirements-local-models.txt
+```
