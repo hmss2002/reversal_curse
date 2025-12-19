@@ -6,9 +6,15 @@
 # 建议：在 conda 环境 reversalcurse 中执行：
 #   pip install -r requirements-local-models.txt
 
-# 新模型支持
-transformers>=4.45.0
-huggingface_hub>=0.24.0
+# 重要（Gemma 3 必需）：
+# - 你这台机器是 V100 + Driver 535（支持 CUDA 11.8/12.x），Gemma 3 需要较新的 transformers，
+#   而新 transformers 会要求 torch>=2.2。
+# - 由于 requirements.txt 无法指定 PyTorch 的 CUDA wheel 索引，建议你先执行：
+#   pip install -U torch==2.2.2 torchvision==0.17.2 torchaudio==2.2.2 --index-url https://download.pytorch.org/whl/cu118
+
+# 新模型支持（Gemma 3 需要更新版）
+transformers>=4.57.0
+huggingface_hub>=0.34.0
 safetensors>=0.4.3
 
 # LoRA

@@ -94,7 +94,69 @@ def parse_args() -> argparse.Namespace:
     # 采样数量（调试用）
     p.add_argument("--max_samples", type=int, default=10_000)
 
+    p.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow execution of model repository code when loading (trust_remote_code=True).",
+    )
+
     return p.parse_args()
+
+
+def _is_gemma3(model_id: str) -> bool:
+    s = model_id.lower()
+    return "gemma-3" in s or "gemma3" in s
+
+
+def _load_tokenizer_and_model(
+    *,
+    base_model_id: str,
+    revision: str,
+    torch_dtype: torch.dtype,
+    trust_remote_code: bool,
+) -> tuple[Any, Any]:
+    """加载 tokenizer + model，并对 gemma3 架构做更友好的兼容处理。"""
+
+    def _load(trust: bool) -> tuple[Any, Any]:
+        tokenizer = AutoTokenizer.from_pretrained(base_model_id, revision=revision, trust_remote_code=trust)
+        model = AutoModelForCausalLM.from_pretrained(
+            base_model_id,
+            revision=revision,
+            torch_dtype=torch_dtype,
+            trust_remote_code=trust,
+        )
+        return tokenizer, model
+
+    try:
+        return _load(trust_remote_code)
+    except ValueError as e:
+        msg = str(e)
+        if "model type" in msg and "gemma3" in msg and "does not recognize" in msg:
+            if (not trust_remote_code) and _is_gemma3(base_model_id):
+                print(
+                    "[warn] Transformers does not recognize gemma3 architecture; retrying with trust_remote_code=True..."
+                )
+                try:
+                    return _load(True)
+                except Exception:
+                    pass
+
+            try:
+                import transformers  # type: ignore
+
+                tf_ver = transformers.__version__
+            except Exception:
+                tf_ver = "(unknown)"
+
+            raise RuntimeError(
+                "Gemma3 模型加载失败：当前 transformers 版本不支持 gemma3 架构。\n"
+                f"- transformers: {tf_ver}\n"
+                "可选修复：\n"
+                "1) 升级 transformers（Gemma3 通常需要更高版本；升级后若提示 torch 版本过低，再升级 torch）；\n"
+                "2) 或者改用 Gemma 2 系列模型（gemma-2-*），避免 gemma3 架构依赖。\n"
+                "如果你确定信任模型仓库代码，也可以加 --trust_remote_code。"
+            ) from e
+        raise
 
 
 def strict_match(pred: str, target: str) -> bool:
@@ -181,15 +243,18 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
 
     # 1) 加载 tokenizer / base model
-    tokenizer = AutoTokenizer.from_pretrained(args.base_model_id, revision=args.revision)
+    torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+    trust_remote_code = bool(args.trust_remote_code) or _is_gemma3(args.base_model_id)
+
+    tokenizer, model = _load_tokenizer_and_model(
+        base_model_id=args.base_model_id,
+        revision=args.revision,
+        torch_dtype=torch_dtype,
+        trust_remote_code=trust_remote_code,
+    )
+
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    model = AutoModelForCausalLM.from_pretrained(
-        args.base_model_id,
-        revision=args.revision,
-        torch_dtype=torch.bfloat16,
-    )
     # 很多 decoder-only 模型没有显式 pad_token_id。
     # 但 generate 需要它来做 batch padding 的对齐；否则会不断打印 warning。
     # 这里统一设置为 tokenizer 的 pad_token_id（我们上面已经保证不为 None）。

@@ -80,6 +80,17 @@ MODEL_PRESETS: Dict[str, Dict[str, str]] = {
         "revision": "093f9f388b31de276ce2de164bdc2081324b9767",
     },
 
+    # Gemma 3 在 transformers 较旧版本上会无法加载（model_type=gemma3）。
+    # 这里提供 Gemma 2 作为兼容备选（同样锁定到精确 sha）。
+    "gemma2_2b": {
+        "repo_id": "google/gemma-2-2b-it",
+        "revision": "299a8560bedf22ed1c72a8a11e7dce4a7f9f51f8",
+    },
+    "gemma2_9b": {
+        "repo_id": "google/gemma-2-9b-it",
+        "revision": "11c9b309abf73637e4b6f9a3fa1e92e615547819",
+    },
+
     # ----------------------------
     # Llama 无法获批时的可替代模型（公开可下载，3B~4B 左右，较新）
     # ----------------------------
@@ -153,17 +164,35 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight_decay", type=float, default=0.0)
     p.add_argument("--warmup_ratio", type=float, default=0.03)
 
+    # 稳定性
+    p.add_argument(
+        "--max_grad_norm",
+        type=float,
+        default=1.0,
+        help="Gradient clipping. fp16 下建议保持 >0（例如 1.0）以避免 NaN。",
+    )
+
     # batch/累积
     p.add_argument("--micro_batch_size", type=int, default=1)
     p.add_argument("--grad_accum_steps", type=int, default=8)
+
+    # 说明：某些新模型（例如 Gemma 3）在旧版 transformers 上会出现
+    # “model_type=gemma3 但 Transformers 不认识架构”的报错。
+    # 这时如果模型仓库提供了 remote code（auto_map），可以用 trust_remote_code 解决。
+    # 出于安全与可控性考虑，默认不全局开启；但我们会对 gemma-3* 自动尝试一次。
+    p.add_argument(
+        "--trust_remote_code",
+        action="store_true",
+        help="Allow execution of model repository code when loading (trust_remote_code=True).",
+    )
 
     # mixed precision
     p.add_argument(
         "--mixed_precision",
         type=str,
-        default="bf16",
-        choices=["no", "fp16", "bf16"],
-        help="bf16 在多数新卡上更稳；如果不支持请改成 fp16 或 no",
+        default="fp16",
+        choices=["no", "fp16"],
+        help="统一使用 fp16；如需禁用混精度请用 no",
     )
 
     # 输出目录：
@@ -187,6 +216,68 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _is_gemma3(model_id: str) -> bool:
+    # 兼容 repo id（google/gemma-3-4b-it）以及本地路径里可能包含 gemma-3
+    s = model_id.lower()
+    return "gemma-3" in s or "gemma3" in s
+
+
+def _load_tokenizer_and_model(
+    *,
+    model_id: str,
+    revision: str,
+    torch_dtype: torch.dtype | None,
+    trust_remote_code: bool,
+) -> tuple[object, object]:
+    """加载 tokenizer + model，并对 gemma3 架构做更友好的兼容处理。"""
+
+    def _load(trust: bool) -> tuple[object, object]:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=trust)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            revision=revision,
+            torch_dtype=torch_dtype,
+            trust_remote_code=trust,
+        )
+        return tokenizer, model
+
+    try:
+        return _load(trust_remote_code)
+    except ValueError as e:
+        msg = str(e)
+
+        # 针对 Gemma3 的典型报错：transformers 版本不识别 model_type=gemma3
+        if "model type" in msg and "gemma3" in msg and "does not recognize" in msg:
+            # 如果用户没显式开 trust_remote_code，并且确实是 gemma3，我们自动再试一次。
+            if (not trust_remote_code) and _is_gemma3(model_id):
+                print(
+                    "[warn] Transformers does not recognize gemma3 architecture; retrying with trust_remote_code=True..."
+                )
+                try:
+                    return _load(True)
+                except Exception:
+                    pass
+
+            # 仍然失败：给出明确可操作的提示（别让用户卡在 ValueError）。
+            try:
+                import transformers  # type: ignore
+
+                tf_ver = transformers.__version__
+            except Exception:
+                tf_ver = "(unknown)"
+
+            raise RuntimeError(
+                "Gemma3 模型加载失败：当前 transformers 版本不支持 gemma3 架构。\n"
+                f"- transformers: {tf_ver}\n"
+                "可选修复：\n"
+                "1) 升级 transformers（Gemma3 通常需要更高版本；升级后若提示 torch 版本过低，再升级 torch）；\n"
+                "2) 或者改用 Gemma 2 系列模型（gemma-2-*），避免 gemma3 架构依赖。\n"
+                "如果你确定信任模型仓库代码，也可以加 --trust_remote_code。"
+            ) from e
+
+        raise
 
 
 def _resolve_model_ids(args: argparse.Namespace) -> List[tuple[str, str, str]]:
@@ -238,24 +329,27 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
 
     print(f"[model] loading: {model_id} (revision={revision})")
 
-    # 2) 加载 tokenizer
-    # - use_fast: 新模型多数有 fast tokenizer，但有时会有兼容问题；这里让 transformers 自动选择
-    tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision)
+    # 2) 加载 tokenizer + base model
+    # - torch_dtype：默认 fp16 时会用 half 权重以省显存；但少数模型（例如 Gemma3）在 V100 上
+    #   half 权重 + fp16 autocast 容易出现 NaN。对这类模型我们改为：fp32 权重 + autocast(fp16)。
+    # - 注意：这里的 dtype 主要影响权重加载；forward 里的 autocast 由训练循环控制。
+    if args.mixed_precision == "fp16" and _is_gemma3(model_id):
+        torch_dtype = None
+        print("[warn] gemma3 + fp16 detected: loading weights in fp32 for stability (autocast(fp16) still enabled).")
+    else:
+        torch_dtype = torch.float16 if args.mixed_precision == "fp16" else None
 
-    # 训练时最好有 pad_token；很多 decoder-only 模型没有 pad_token，我们用 eos 代替。
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # 3) 加载模型
-    # - torch_dtype：如果显卡支持 bf16 则更稳；否则 fp16。
-    # - 注意：accelerate 也会在 forward 时做混精，这里的 dtype 主要影响权重加载。
-    torch_dtype = torch.bfloat16 if args.mixed_precision == "bf16" else (torch.float16 if args.mixed_precision == "fp16" else None)
-
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
+    trust_remote_code = bool(args.trust_remote_code) or _is_gemma3(model_id)
+    tokenizer, model = _load_tokenizer_and_model(
+        model_id=model_id,
         revision=revision,
         torch_dtype=torch_dtype,
+        trust_remote_code=trust_remote_code,
     )
+
+    # 训练时最好有 pad_token；很多 decoder-only 模型没有 pad_token，我们用 eos 代替。
+    if getattr(tokenizer, "pad_token_id", None) is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     # 为了让训练更省显存，关闭 cache（否则会存 KV）
     if getattr(model.config, "use_cache", None) is True:
@@ -295,6 +389,7 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
         grad_accum_steps=args.grad_accum_steps,
         log_every_steps=args.log_every_steps,
         save_dir=output_dir,
+        max_grad_norm=args.max_grad_norm,
     )
 
     stats = train_with_token_budget(

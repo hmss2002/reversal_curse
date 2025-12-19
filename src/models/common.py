@@ -39,7 +39,8 @@ def load_tokenizer(model_id_or_path: str, local: bool = True) -> Union[PreTraine
 
 def load_model(model_id_or_path: str) -> PreTrainedModel:
     if "llama" in model_id_or_path or "alpaca" in model_id_or_path:
-        model = LlamaForCausalLM.from_pretrained(model_id_or_path, torch_dtype=torch.bfloat16, use_cache=False)
+        torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        model = LlamaForCausalLM.from_pretrained(model_id_or_path, torch_dtype=torch_dtype, use_cache=False)
         assert isinstance(model, LlamaForCausalLM)
     elif "pythia" in model_id_or_path:
         model = AutoModelForCausalLM.from_pretrained(model_id_or_path, use_cache=False)

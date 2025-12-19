@@ -54,6 +54,9 @@ class TrainConfig:
     micro_batch_size: int = 1
     grad_accum_steps: int = 8
 
+    # 稳定性：梯度裁剪（fp16 下建议开启，避免数值爆炸导致 NaN）
+    max_grad_norm: float = 1.0
+
     # 日志
     log_every_steps: int = 20
 
@@ -68,7 +71,7 @@ def train_with_token_budget(
     config: TrainConfig,
     tokenizer: Any,
     device: torch.device,
-    mixed_precision: str = "bf16",
+    mixed_precision: str = "fp16",
 ) -> Dict[str, Any]:
     """按 token_budget 训练 LoRA 模型。
 
@@ -97,12 +100,11 @@ def train_with_token_budget(
     model.train()
 
     # mixed precision 设置：
-    # - bf16：多数 A100/H100/40 系列支持，稳定
-    # - fp16：老卡可用，但需要 GradScaler
+    # - fp16：使用 autocast + GradScaler
     # - no：全精度
-    use_autocast = mixed_precision in ("bf16", "fp16") and device.type == "cuda"
-    autocast_dtype = torch.bfloat16 if mixed_precision == "bf16" else torch.float16
-    scaler = torch.cuda.amp.GradScaler(enabled=(mixed_precision == "fp16" and device.type == "cuda"))
+    use_autocast = mixed_precision == "fp16" and device.type == "cuda"
+    autocast_dtype = torch.float16
+    scaler = torch.cuda.amp.GradScaler(enabled=(use_autocast and device.type == "cuda"))
 
     tokens_seen = 0
     steps = 0
@@ -135,12 +137,30 @@ def train_with_token_budget(
                 outputs = model(**batch)
                 loss = outputs.loss / config.grad_accum_steps
 
+            # 兜底：如果 loss 已经是 NaN/Inf，说明 forward 数值已不稳定。
+            # 这种情况下继续 backward/step 只会把参数破坏得更严重。
+            if not torch.isfinite(loss.detach()):
+                raise RuntimeError(
+                    "训练过程中出现 NaN/Inf loss（forward 已不稳定）。\n"
+                    "常见原因：fp16 数值溢出、学习率过高、或某些 attention kernel 在该 GPU 上不稳定。\n"
+                    "建议：降低 --lr（例如 2e-5~5e-5）、开启/加严梯度裁剪（max_grad_norm）、"
+                    "或对特定模型改为 fp32 权重加载再用 autocast(fp16)。"
+                )
+
             if scaler.is_enabled():
                 scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            if steps % config.grad_accum_steps == 0:
+            # 注意：steps 从 0 开始计数，因此判断应使用 (steps + 1)
+            # 否则在 steps=0 时就会提前执行 optimizer.step()。
+            if (steps + 1) % config.grad_accum_steps == 0:
+                # 梯度裁剪（对 fp16 尤其重要）
+                if config.max_grad_norm and config.max_grad_norm > 0:
+                    if scaler.is_enabled():
+                        scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=config.max_grad_norm)
+
                 if scaler.is_enabled():
                     scaler.step(optimizer)
                     scaler.update()

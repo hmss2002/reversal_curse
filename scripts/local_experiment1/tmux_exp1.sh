@@ -41,7 +41,8 @@ TOKEN_BUDGET="${TOKEN_BUDGET:-2000000}"
 MAX_SEQ_LEN="${MAX_SEQ_LEN:-512}"
 MICRO_BS="${MICRO_BS:-1}"
 GRAD_ACCUM="${GRAD_ACCUM:-8}"
-MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
+MIXED_PRECISION="${MIXED_PRECISION:-fp16}"
+MAX_GRAD_NORM="${MAX_GRAD_NORM:-1.0}"
 
 # 评测：强约束指令（默认英文，减少模板语言冲突）
 FORMAT_INSTR="${FORMAT_INSTR:-\n\nAnswer with only the persons name. Do not explain.\n}"
@@ -73,7 +74,7 @@ tmux new-session -d -s "$SESSION" -c "$ROOT_DIR" "bash"
 # window 1: phi
 TMUX_CMD_PHI="cd $ROOT_DIR && \
   echo '[phi] start' && date && \
-  $PY scripts/local_experiment1/train_lora.py --preset phi3_5_mini_instruct --token_budget $TOKEN_BUDGET --max_seq_len $MAX_SEQ_LEN --micro_batch_size $MICRO_BS --grad_accum_steps $GRAD_ACCUM --mixed_precision $MIXED_PRECISION --output_dir $PHI_DIR 2>&1 | tee $PHI_DIR/train.log && \
+  $PY scripts/local_experiment1/train_lora.py --preset phi3_5_mini_instruct --token_budget $TOKEN_BUDGET --max_seq_len $MAX_SEQ_LEN --micro_batch_size $MICRO_BS --grad_accum_steps $GRAD_ACCUM --mixed_precision $MIXED_PRECISION --max_grad_norm $MAX_GRAD_NORM --output_dir $PHI_DIR 2>&1 | tee $PHI_DIR/train.log && \
   $PY scripts/local_experiment1/eval_experiment1.py --base_model_id microsoft/Phi-3.5-mini-instruct --revision 2fe192450127e6a83f7441aef6e3ca586c338b77 --lora_dir $PHI_DIR --dataset_dir data/reverse_experiments/june_version_7921032488 --out_dir $PHI_DIR/eval --format_instruction \"$FORMAT_INSTR\" 2>&1 | tee $PHI_DIR/eval.log && \
   date > $PHI_DONE && \
   printf '\\a' && tmux display-message -d 0 '[DONE] phi3_5_mini_instruct finished' && \
@@ -87,7 +88,7 @@ tmux rename-window -t "$SESSION:0" "phi"
 # 注意：base_model_id 必须与训练脚本 preset 一致；这里固定为 Qwen/Qwen3-4B
 TMUX_CMD_QWEN="cd $ROOT_DIR && \
   echo '[qwen] start' && date && \
-  $PY scripts/local_experiment1/train_lora.py --preset qwen3_4b --token_budget $TOKEN_BUDGET --max_seq_len $MAX_SEQ_LEN --micro_batch_size $MICRO_BS --grad_accum_steps $GRAD_ACCUM --mixed_precision $MIXED_PRECISION --output_dir $QWEN_DIR 2>&1 | tee $QWEN_DIR/train.log && \
+  $PY scripts/local_experiment1/train_lora.py --preset qwen3_4b --token_budget $TOKEN_BUDGET --max_seq_len $MAX_SEQ_LEN --micro_batch_size $MICRO_BS --grad_accum_steps $GRAD_ACCUM --mixed_precision $MIXED_PRECISION --max_grad_norm $MAX_GRAD_NORM --output_dir $QWEN_DIR 2>&1 | tee $QWEN_DIR/train.log && \
   $PY scripts/local_experiment1/eval_experiment1.py --base_model_id Qwen/Qwen3-4B --revision 1cfa9a7208912126459214e8b04321603b3df60c --lora_dir $QWEN_DIR --dataset_dir data/reverse_experiments/june_version_7921032488 --out_dir $QWEN_DIR/eval --format_instruction \"$FORMAT_INSTR\" 2>&1 | tee $QWEN_DIR/eval.log && \
   date > $QWEN_DONE && \
   printf '\\a' && tmux display-message -d 0 '[DONE] qwen3_4b finished' && \
@@ -99,7 +100,7 @@ tmux new-window -t "$SESSION" -n "qwen" -c "$ROOT_DIR" "bash"
 # window 3: gemma
 TMUX_CMD_GEMMA="cd $ROOT_DIR && \
   echo '[gemma] start' && date && \
-  $PY scripts/local_experiment1/train_lora.py --preset gemma3_4b --token_budget $TOKEN_BUDGET --max_seq_len $MAX_SEQ_LEN --micro_batch_size $MICRO_BS --grad_accum_steps $GRAD_ACCUM --mixed_precision $MIXED_PRECISION --output_dir $GEMMA_DIR 2>&1 | tee $GEMMA_DIR/train.log && \
+  $PY scripts/local_experiment1/train_lora.py --preset gemma3_4b --token_budget $TOKEN_BUDGET --max_seq_len $MAX_SEQ_LEN --micro_batch_size $MICRO_BS --grad_accum_steps $GRAD_ACCUM --mixed_precision $MIXED_PRECISION --max_grad_norm $MAX_GRAD_NORM --output_dir $GEMMA_DIR 2>&1 | tee $GEMMA_DIR/train.log && \
   $PY scripts/local_experiment1/eval_experiment1.py --base_model_id google/gemma-3-4b-it --revision 093f9f388b31de276ce2de164bdc2081324b9767 --lora_dir $GEMMA_DIR --dataset_dir data/reverse_experiments/june_version_7921032488 --out_dir $GEMMA_DIR/eval --format_instruction \"$FORMAT_INSTR\" 2>&1 | tee $GEMMA_DIR/eval.log && \
   date > $GEMMA_DONE && \
   printf '\\a' && tmux display-message -d 0 '[DONE] gemma3_4b finished' && \
@@ -140,7 +141,14 @@ AGG_CMD="cd $ROOT_DIR && \
 tmux new-window -t "$SESSION" -n "aggregate" -c "$ROOT_DIR" "bash"
 (tmux send-keys -t "$SESSION:aggregate" "$AGG_CMD" C-m)
 
+# window 5: progress（非常明显的进度条面板）
+# 说明：实时从每个模型的 train.log 解析 tokens_seen/预算，绘制进度条。
+PROGRESS_CMD="cd $ROOT_DIR && bash scripts/local_experiment1/watch_progress.sh $RUN_ROOT $TOKEN_BUDGET"
+tmux new-window -t "$SESSION" -n "progress" -c "$ROOT_DIR" "bash"
+(tmux send-keys -t "$SESSION:progress" "$PROGRESS_CMD" C-m)
+
 # 最后：提示用户如何 attach
 
 echo "[tmux] session created: $SESSION"
 echo "Attach: tmux attach -t $SESSION"
+echo "Progress: tmux select-window -t $SESSION:progress"
