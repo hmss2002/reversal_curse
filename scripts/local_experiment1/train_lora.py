@@ -1,36 +1,33 @@
-"""本地开源模型复现实验 1：LoRA 微调（按 token_budget 对齐训练口径）。
+"""本地开源模型复现实验 1：LoRA 微调（默认按 epoch 数结束）。
 
 用法示例（强烈建议先装依赖）：
 
 1) 安装依赖（建议新开一个虚拟环境/conda 环境执行）
-   pip install -r requirements-local-models.txt
+    pip install -r requirements-local-models.txt
 
-2) 训练（单模型）
-   python scripts/local_experiment1/train_lora.py \
-     --model_id Qwen/Qwen3-4B \
-     --dataset_dir data/reverse_experiments/june_version_7921032488 \
-     --token_budget 2000000 \
-     --max_seq_len 512 \
-     --output_dir outputs/exp1_qwen3_4b_lora
+2) 训练（单模型，默认 num_epochs=1，至少把训练集看一遍）
+    python scripts/local_experiment1/train_lora.py \
+      --model_id Qwen/Qwen3-4B \
+      --dataset_dir data/reverse_experiments/june_version_7921032488 \
+      --num_epochs 1 \
+      --max_seq_len 512 \
+      --output_dir outputs/exp1_qwen3_4b_lora
 
 3) 训练（三模型，依次跑）
-   python scripts/local_experiment1/train_lora.py \
-     --preset llama3_2_3b,qwen3_4b,gemma3_4b \
-     --token_budget 2000000 \
-     --max_seq_len 512 \
-     --output_root outputs/exp1_batch
+    python scripts/local_experiment1/train_lora.py \
+      --preset llama3_2_3b,qwen3_4b,gemma3_4b \
+      --num_epochs 1 \
+      --max_seq_len 512 \
+      --output_root outputs/exp1_batch
 
-重要说明（与你的要求逐条对应）：
+重要说明：
 - “同一训练策略：统一 LoRA”：本脚本只训练 LoRA 参数，基座权重被冻结。
-- “同一训练步数口径：token 总量一致”：用 token_budget 控制停止条件。
-- “自己下载开源模型”：from_pretrained 会自动下载；也可用 scripts/local_models/download_models.py 预下载。
+- 默认“按 epoch 结束”：用 num_epochs 控制停止条件（至少完整遍历训练集）。
+- 如你仍想按 token 总量对齐（旧口径）：用 token_budget 控制停止条件。
 
 注意：
 - Llama 3.2 / Qwen3 / Gemma 3 需要较新 transformers。
 - 本仓库原始 transformers=4.28.1，若不升级会加载失败。
-  请按 requirements-local-models.txt 升级依赖。
-
-本脚本刻意写了非常详细的中文注释，方便你审计与改造。
 """
 
 from __future__ import annotations
@@ -52,7 +49,7 @@ from src.local_experiment1.data import (
     load_jsonl,
 )
 from src.local_experiment1.lora import LoRAArgs, apply_lora
-from src.local_experiment1.train_token_budget import TrainConfig, train_with_token_budget
+from src.local_experiment1.train_token_budget import TrainConfig, train_with_epochs, train_with_token_budget
 
 
 # ----------------------------
@@ -62,11 +59,8 @@ from src.local_experiment1.train_token_budget import TrainConfig, train_with_tok
 # - 这些 ID 可能因你是否有访问权限而不同（例如 Llama / Gemma 通常需要同意协议或 HF token）。
 # - 如果你在 HF 上用的是其它镜像/私有仓库，把这里改成你的 model_id 即可。
 MODEL_PRESETS: Dict[str, Dict[str, str]] = {
-    # 下面三个 preset 的 repo_id + revision（commit sha）来自我在你当前环境里
-    # 通过 HuggingFace API 探测到的“可访问版本”。这样你每次跑实验都用同一版本，结果可复现。
-    #
-    # 注意：Llama/Gemma 可能是 gated=manual，需要你在 HF 上同意协议并提供 HF_TOKEN。
-
+    # 下面三个 preset 的 repo_id + revision（commit sha）用于把模型版本锁死，便于复现。
+    # 注意：Llama/Gemma 可能 gated=manual，需要你在 HF 上同意协议并提供 HF_TOKEN。
     "llama3_2_3b": {
         "repo_id": "meta-llama/Llama-3.2-3B-Instruct",
         "revision": "0cb88a4f764b7a12671c53f0838cd831a0843b95",
@@ -94,23 +88,19 @@ MODEL_PRESETS: Dict[str, Dict[str, str]] = {
     # ----------------------------
     # Llama 无法获批时的可替代模型（公开可下载，3B~4B 左右，较新）
     # ----------------------------
-    # Qwen2.5-3B-Instruct（约 3B，中文/英文都很强，公开可下载）
     "qwen2_5_3b_instruct": {
         "repo_id": "Qwen/Qwen2.5-3B-Instruct",
         "revision": "aa8e72537993ba99e69dfaafa59ed015b17504d1",
     },
-    # Phi-3.5-mini-instruct（约 3.8B，较新，公开可下载）
     "phi3_5_mini_instruct": {
         "repo_id": "microsoft/Phi-3.5-mini-instruct",
         "revision": "2fe192450127e6a83f7441aef6e3ca586c338b77",
     },
-    # Falcon3-3B-Instruct（约 3B，公开可下载）
     "falcon3_3b_instruct": {
         "repo_id": "tiiuae/falcon3-3b-instruct",
         "revision": "411bb94318f94f7a5735b77109f456b1e74b42a1",
     },
 }
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -143,8 +133,22 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--train_file", type=str, default="all_prompts_train.jsonl")
 
-    # 训练口径（核心）
-    p.add_argument("--token_budget", type=int, required=True, help="Total tokens seen during training")
+    # 训练停止条件（二选一）：
+    # - 默认：按 epoch 数结束（至少完整遍历训练集）
+    # - 兼容旧口径：按 token_budget 对齐
+    stop = p.add_mutually_exclusive_group(required=False)
+    stop.add_argument(
+        "--num_epochs",
+        type=int,
+        default=1,
+        help="Number of epochs to train (default=1). Guarantees seeing the full training set once.",
+    )
+    stop.add_argument(
+        "--token_budget",
+        type=int,
+        default=None,
+        help="(Legacy) Total tokens seen during training. If set, training stops by token_budget instead of epochs.",
+    )
 
     # 序列长度
     p.add_argument("--max_seq_len", type=int, default=512)
@@ -205,7 +209,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--log_every_steps", type=int, default=20)
 
-    return p.parse_args()
+    args = p.parse_args()
+    if args.token_budget is None and int(args.num_epochs) <= 0:
+        raise ValueError("--num_epochs 必须 > 0（默认 1）。")
+    if args.token_budget is not None and int(args.token_budget) <= 0:
+        raise ValueError("--token_budget 必须 > 0。")
+    return args
 
 
 def set_seed(seed: int) -> None:
@@ -216,6 +225,38 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def _ddp_env() -> tuple[bool, int, int, int]:
+    """读取 torchrun 注入的环境变量。
+
+    返回：(ddp_enabled, rank, world_size, local_rank)
+    """
+
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    ddp_enabled = world_size > 1
+    return ddp_enabled, rank, world_size, local_rank
+
+
+def _init_ddp_if_needed() -> tuple[bool, int, int, int]:
+    ddp_enabled, rank, world_size, local_rank = _ddp_env()
+    if not ddp_enabled:
+        return ddp_enabled, rank, world_size, local_rank
+
+    if not torch.distributed.is_available():
+        raise RuntimeError("torch.distributed 不可用，但你在用 torchrun 启动。")
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("torchrun/DDP 需要 CUDA，但当前未检测到 CUDA。")
+
+    if not torch.distributed.is_initialized():
+        torch.distributed.init_process_group(backend="nccl")
+
+    # 每个进程绑定本地 GPU
+    torch.cuda.set_device(local_rank)
+    return ddp_enabled, rank, world_size, local_rank
 
 
 def _is_gemma3(model_id: str) -> bool:
@@ -312,7 +353,12 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
     # 依赖/版本检查（避免 transformers 太老导致加载失败）
     require_min_versions()
 
-    set_seed(args.seed)
+    # 0) DDP 初始化（如果用 torchrun 启动）
+    ddp_enabled, rank, world_size, local_rank = _init_ddp_if_needed()
+    is_main_process = rank == 0
+
+    # 让不同 rank 的随机性略有区别（但仍然可复现）
+    set_seed(args.seed + rank)
 
     # 选择输出目录
     if args.output_dir:
@@ -320,14 +366,18 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
     else:
         output_dir = os.path.join(args.output_root, name)
 
-    # 1) 选择 device（单机单卡/CPU）
+    # 1) 选择 device（单机单卡/CPU 或 DDP 单进程单卡）
     # 说明：原本我们用 accelerate 来同时支持多卡与混精，但你当前环境里 accelerate 会在 import 阶段
     # 触发 deepspeed 的导入，而 deepspeed(0.9.1) 与 numpy(1.24+) 在这里不兼容，导致脚本无法启动。
     # 为了先把“本地 LoRA 跑通”，这里改为纯 PyTorch 训练循环。
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[device] {device}")
+    if ddp_enabled:
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    print(f"[model] loading: {model_id} (revision={revision})")
+    if is_main_process:
+        print(f"[device] {device} (ddp={ddp_enabled} rank={rank}/{world_size} local_rank={local_rank})")
+        print(f"[model] loading: {model_id} (revision={revision})")
 
     # 2) 加载 tokenizer + base model
     # - torch_dtype：默认 fp16 时会用 half 权重以省显存；但少数模型（例如 Gemma3）在 V100 上
@@ -371,17 +421,37 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
     dataset = PromptCompletionDataset(rows=rows, tokenizer=tokenizer, max_seq_len=args.max_seq_len)
     collator = DataCollatorForCausalLMPromptCompletion(pad_token_id=int(tokenizer.pad_token_id))
 
-    train_loader = DataLoader(
-        dataset,
-        batch_size=args.micro_batch_size,
-        shuffle=True,
-        collate_fn=collator,
-        drop_last=False,
-    )
+    if ddp_enabled:
+        from torch.utils.data.distributed import DistributedSampler
 
-    # 6) 开始训练：按 token_budget 停止
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True, drop_last=False)
+        train_loader = DataLoader(
+            dataset,
+            batch_size=args.micro_batch_size,
+            sampler=sampler,
+            shuffle=False,
+            collate_fn=collator,
+            drop_last=False,
+        )
+    else:
+        train_loader = DataLoader(
+            dataset,
+            batch_size=args.micro_batch_size,
+            shuffle=True,
+            collate_fn=collator,
+            drop_last=False,
+        )
+
+    # DDP：wrap（必须在构造 optimizer 前完成；我们的 optimizer 在 train_token_budget 内部创建）
+    if ddp_enabled:
+        model.to(device)
+        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+
+    # 6) 开始训练：默认按 num_epochs 停止（至少遍历训练集一次）
+    # 兼容旧模式：若显式提供 --token_budget，则按 token_budget 停止。
     train_cfg = TrainConfig(
         token_budget=args.token_budget,
+        num_epochs=int(args.num_epochs) if args.token_budget is None else 0,
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         warmup_ratio=args.warmup_ratio,
@@ -392,31 +462,52 @@ def train_one_model(*, name: str, model_id: str, revision: str, args: argparse.N
         max_grad_norm=args.max_grad_norm,
     )
 
-    stats = train_with_token_budget(
-        model=model,
-        train_dataloader=train_loader,
-        config=train_cfg,
-        tokenizer=tokenizer,
-        device=device,
-        mixed_precision=args.mixed_precision,
-    )
+    if args.token_budget is not None:
+        stats = train_with_token_budget(
+            model=model,
+            train_dataloader=train_loader,
+            config=train_cfg,
+            tokenizer=tokenizer,
+            device=device,
+            mixed_precision=args.mixed_precision,
+            is_main_process=is_main_process,
+        )
+    else:
+        stats = train_with_epochs(
+            model=model,
+            train_dataloader=train_loader,
+            config=train_cfg,
+            tokenizer=tokenizer,
+            device=device,
+            mixed_precision=args.mixed_precision,
+            is_main_process=is_main_process,
+        )
 
-    # 7) 保存训练元信息
-    meta = {
-        "name": name,
-        "model_id": model_id,
-        "revision": revision,
-        "dataset_dir": args.dataset_dir,
-        "train_file": args.train_file,
-        "max_seq_len": args.max_seq_len,
-        "token_budget": args.token_budget,
-        "lora": asdict(lora_args),
-        "train": stats,
-    }
-    os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "train_meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-    print(f"[done] saved training meta: {os.path.join(output_dir, 'train_meta.json')}")
+    # 7) 保存训练元信息（只在主进程写文件，避免 DDP 下并发写）
+    if is_main_process:
+        meta = {
+            "name": name,
+            "model_id": model_id,
+            "revision": revision,
+            "dataset_dir": args.dataset_dir,
+            "train_file": args.train_file,
+            "max_seq_len": args.max_seq_len,
+            "num_epochs": args.num_epochs,
+            "token_budget": args.token_budget,
+            "lora": asdict(lora_args),
+            "train": stats,
+            "ddp": ddp_enabled,
+            "world_size": world_size,
+        }
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "train_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False, indent=2)
+        print(f"[done] saved training meta: {os.path.join(output_dir, 'train_meta.json')}")
+
+    # DDP 清理
+    if ddp_enabled and torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
 
 
 def main() -> None:
