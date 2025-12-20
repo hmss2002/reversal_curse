@@ -50,7 +50,7 @@ def load_results(exp_dir: str) -> pd.DataFrame:
             "n_samples": summary["n_samples"],
             "forward_accuracy": summary["forward_accuracy"],
             "reverse_accuracy": summary["reverse_accuracy"],
-            "both_correct": summary["both_correct"],
+            "both_correct_rate": summary["both_correct_rate"],
             "reversal_failure_rate": summary["reversal_failure_rate"],
         })
     
@@ -110,8 +110,8 @@ def plot_comparison(df: pd.DataFrame, output_dir: str):
     
     # Calculate categories
     df = df.copy()
-    df["forward_only"] = df["forward_accuracy"] - df["both_correct"]
-    df["reverse_only"] = df["reverse_accuracy"] - df["both_correct"]
+    df["forward_only"] = df["forward_accuracy"] - df["both_correct_rate"]
+    df["reverse_only"] = df["reverse_accuracy"] - df["both_correct_rate"]
     df["neither"] = 1 - df["forward_accuracy"] - df["reverse_only"]
     
     colors = ["#4CAF50", "#2196F3", "#FF9800", "#9E9E9E"]
@@ -119,7 +119,7 @@ def plot_comparison(df: pd.DataFrame, output_dir: str):
     
     bottom = np.zeros(len(df))
     for i, (col, color, label) in enumerate(zip(
-        ["both_correct", "forward_only", "reverse_only", "neither"],
+        ["both_correct_rate", "forward_only", "reverse_only", "neither"],
         colors, labels
     )):
         values = df[col].values * 100
@@ -178,7 +178,7 @@ def print_summary_table(df: pd.DataFrame):
         print(f"{row['model']:<20} "
               f"{row['forward_accuracy']*100:>6.1f}%     "
               f"{row['reverse_accuracy']*100:>6.1f}%     "
-              f"{row['both_correct']*100:>6.1f}%     "
+              f"{row['both_correct_rate']*100:>6.1f}%     "
               f"{row['reversal_failure_rate']*100:>6.1f}%")
     
     print("-" * 68)

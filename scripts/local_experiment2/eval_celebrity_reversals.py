@@ -62,7 +62,11 @@ def normalize_name(name: str) -> str:
 
 
 def check_name_match(predicted: str, expected: str) -> bool:
-    """Check if predicted name matches expected name."""
+    """Check if predicted name matches expected name.
+    
+    Stricter matching: requires both first AND last name to match,
+    or full name containment.
+    """
     pred_norm = normalize_name(predicted)
     exp_norm = normalize_name(expected)
     
@@ -73,22 +77,27 @@ def check_name_match(predicted: str, expected: str) -> bool:
     if pred_norm == exp_norm:
         return True
     
-    # Check if expected is contained in predicted (first few words)
     pred_words = pred_norm.split()
     exp_words = exp_norm.split()
     
-    # Match first name or last name
-    if len(pred_words) >= 1 and len(exp_words) >= 1:
-        # First name match
-        if pred_words[0] == exp_words[0]:
+    # For multi-word names, require BOTH first AND last name to match
+    if len(pred_words) >= 2 and len(exp_words) >= 2:
+        first_match = pred_words[0] == exp_words[0]
+        last_match = pred_words[-1] == exp_words[-1]
+        if first_match and last_match:
             return True
-        # Last name match (if available)
-        if len(pred_words) >= 2 and len(exp_words) >= 2:
-            if pred_words[-1] == exp_words[-1]:
-                return True
     
-    # Check substring containment
-    if exp_norm in pred_norm or pred_norm in exp_norm:
+    # For single-word names (rare), require exact match
+    if len(pred_words) == 1 and len(exp_words) == 1:
+        return pred_norm == exp_norm
+    
+    # Check if full expected name is contained in predicted
+    # But predicted must not be much longer (avoid false positives from long responses)
+    if exp_norm in pred_norm and len(pred_norm) < len(exp_norm) * 2:
+        return True
+    
+    # Check if full predicted name is contained in expected
+    if pred_norm in exp_norm:
         return True
     
     return False
@@ -134,21 +143,31 @@ class LocalModelEvaluator:
         self.model_id = model_id
         self.device = device
         
+        # Check if this is Phi-3.5 which has compatibility issues with custom code
+        is_phi = "phi" in model_id.lower()
+        
         print(f"Loading model: {model_id}")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_id,
-            trust_remote_code=True,
+            trust_remote_code=not is_phi,  # Phi-3.5 has issues with custom code
             padding_side="left",
         )
         
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
+        # Model loading with special handling for Phi-3.5
+        model_kwargs = {
+            "torch_dtype": torch_dtype,
+            "device_map": "auto",
+            "trust_remote_code": not is_phi,
+        }
+        if is_phi:
+            model_kwargs["attn_implementation"] = "eager"
+        
         self.model = AutoModelForCausalLM.from_pretrained(
             model_id,
-            torch_dtype=torch_dtype,
-            device_map="auto",
-            trust_remote_code=True,
+            **model_kwargs,
         )
         self.model.eval()
         print(f"Model loaded on {self.device}")
