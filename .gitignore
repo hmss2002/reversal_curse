@@ -1,26 +1,54 @@
+# ===== 环境 & 密钥 =====
 .env
-logs/
-sweep_configs/
-__pycache__
-cache
-openai_cache
-poetry.lock
-wandb
-results
-*train.csv
-*val.csv
-scripts/**/*.log
-venv
-natural-instructions/
-ICIL/
-.vscode/
-tests/data/output
-ICIL
-.DS_Store
-settings.json
+venv/
+.venv/
 
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.pyc
+.ipynb_checkpoints/
+
+# ===== 模型权重 (太大不提交) =====
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+
+# ===== 实验输出 =====
+runs/
+results/
 /models
 /ckpts
 /output
-logs
-sweep_configs
+
+# ===== 缓存 =====
+cache/
+openai_cache/
+wandb/
+
+# ===== 数据文件 =====
+*train.csv
+*val.csv
+
+# ===== 日志 =====
+logs/
+*.log
+scripts/**/*.log
+
+# ===== 编辑器 & 系统 =====
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+settings.json
+
+# ===== 项目特定 =====
+sweep_configs/
+natural-instructions/
+ICIL/
+tests/data/output
+poetry.lock
